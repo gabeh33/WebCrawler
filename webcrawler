@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+# Gabe Holmes
+# Project 5 CS3700 - Web Crawler
+import socket
+import ssl
+import sys
+import re
+
+# List of unvisited urls, use frontier.pop(0) to get the one that's been there the longest
+frontier = []
+
+# List of urls that have already been visited, don't visit the same one twice
+# Starts with these three cause we GET them directly in crawl(), all others
+# that are added will be automatic
+visited = ['/accounts/logout/', '/', '/fakebook/']
+
+# List of flags found
+flags = []
+
+root = "fakebook.3700.network"
+login_url = "/accounts/login/?next=/fakebook/"
+
+username = str(sys.argv[1])
+password = str(sys.argv[2])
+# NDMUGG63AW9HJ1FL
+
+port = 443
+printResponses = False
+printCrawling = True
+
+
+# Send a GET request to the subdomain
+def send_http_get(socket: socket, subdomain):
+    msg = 'GET {} HTTP/1.1\n' \
+          'Host: {}\r\n\r\n'.format(subdomain, root)
+    socket.send(msg.encode())
+    return handleResponse(socket)
+
+
+def login(sock: socket):  # Tries to login to the server, and get the cookie and csrftoken
+    statusCode, headers, htmlRegion, array = send_http_get(sock, login_url)
+    if statusCode != 200:
+        print("Received a status code that was not 200 in login method") if printResponses else None
+        print("Could not log in, exiting...")
+        sys.exit(1)
+
+    cookieString = headers['Set-Cookie']
+    cookie = cookieString[cookieString.find("=") + 1:cookieString.find(";")]
+
+    if printResponses:
+        print("Cookie = " + cookie)
+
+    # Get the csrf token needed for logging in
+    csrf_middleware_token = get_csrf_token(htmlRegion)
+    if printResponses:
+        print("csrfMiddlewareToken = " + csrf_middleware_token)
+    sock.close()
+
+    sock2 = make_new_socket()
+
+    # body from inspecting the post request online
+    # username=holmes.ga&password=NDMUGG63AW9HJ1FL&csrfmiddlewaretoken=9MgJgAnv3OIZSFgQhFPJ9Fne9eRdzXSNt9TwPFSHnkXe3s6Qq0lO0VeNXB79TcAc&next=%2Ffakebook%2F
+    body = 'username=' + username + '&password=' + password + '&csrfmiddlewaretoken=' + csrf_middleware_token + '&next='
+    postRequest = "POST /accounts/login/ HTTP/1.1 \r\n" \
+                  "Host: fakebook.3700.network\r\n" \
+                  "Cookie: csrftoken=" + cookie + "\r\n" \
+                  "Content-Type: application/x-www-form-urlencoded\r\n" \
+                  "Connection: keep-alive\r\n" \
+                  "Content-Length: " + str(len(body)) + "\r\n\r\n" \
+                  + body + "\r\n\r\n"
+    if printResponses:
+        print("---------")
+        print(postRequest)
+        print("---------")
+    sock2.send(postRequest.encode())
+    postCode, postHeaders, postHTML, postArray = handleResponse(sock2)
+
+    if postCode != 302:
+        print("Did not receive a 302 code after logging in, exiting...")
+        sys.exit(1)
+    # Get the session id that is returned after logging in
+    sessionID = get_session_id(postHeaders)
+    if printResponses:
+        print("sessionID from logging in = " + sessionID)
+
+    # Get the csrfToken that is also returned after logging in
+    csrf_token = extract_cookie(postArray)
+    if printResponses:
+        print("csrf token from logging in = " + csrf_token + "\n\n")
+    # Now that we have the csrf token and session id, we can start crawling the website
+    return csrf_token, sessionID
+
+
+def extract_cookie(post_arr):
+    string = "".join(post_arr)
+    string = string[string.find("csrftoken=") + 10:]
+    return string[:string.find("; expires=")]
+
+
+def get_session_id(headers):
+    substr = headers['Set-Cookie']
+    substr = substr[10:]
+    return substr[:substr.find("; expires=")]
+
+
+def get_csrf_token(html):
+    substr = html[html.find("value=\"") + 7:]
+    return substr[:substr.find("\">")]
+
+
+# Handles the responses from the server
+def handleResponse(soc):
+    reply = str(soc.recv(4096))
+    end_of_file = reply.find('\\r\\n\\r\\n')
+    while end_of_file == -1:
+        reply += str(soc.recv(4096))
+        end_of_file = reply.find('\\r\\n\\r\\n')
+    replyString = "|".join(reply.split("\\r\\n"))  # Get rid of the '\r\n' instances
+    # and replace them with "|"
+
+    responseindex = replyString.find(" ") + 1
+    responseCode = replyString[responseindex:responseindex + 3]  # The code the server sends back, 200 is okay
+
+    htmlTagIndex = replyString.find("<!DOCTYPE html")
+    htmlRegion = replyString[htmlTagIndex:]  # The start of the html that the server sent back
+
+    dictArray = replyString[replyString.find("|"):replyString.rindex("|")].split("|")
+
+    dictToReturn = {}
+
+    for entry in dictArray:
+        if entry != '':
+            middle = entry.find(":")
+            dictToReturn[entry[:middle]] = entry[middle + 2:]
+    if printResponses:
+        print("STATUS CODE: " + responseCode)
+        print("HTML REGION: " + htmlRegion)
+        print(dictToReturn)
+        print("-----------------------------")
+
+    if int(responseCode) != 200 and printResponses:
+        print("Got a " + str(responseCode) + " code")
+
+    return int(responseCode), dictToReturn, htmlRegion, dictArray
+
+
+# Send a get request that includes the csrf token and session id from logging in
+def http_get_with_cookies(csrf_token, session_id, subdomain, socket):
+    if printCrawling:
+        print("Crawling {}{}".format(root, subdomain))
+    msg = 'GET {} HTTP/1.1\r\n' \
+          'Host: {}\r\n' \
+          'Referer: https://fakebook.3700.network/fakebook/\r\n' \
+          'Connection: keep-alive\r\n' \
+          'Cookie: csrftoken={}; sessionid={}\r\n\r\n'.format(subdomain, root, csrf_token, session_id)
+    visited.append(subdomain)
+    socket.send(msg.encode())
+
+
+# Make a new socket, connect it, and wrap in tls
+def make_new_socket():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(4)
+    sock.connect((root, port))
+    sock = ssl.wrap_socket(sock)
+    return sock
+
+
+# Scans the html for and <a href='/fakebook/ random numbers/'> tags. Adds them to
+# the frontier if they are not in visited and not already in frontier
+def parse_html_for_links(html: str):
+    if len(html) < 10:
+        print("Received an html region with less than 10 characters, returning...")
+        return
+    # Find all the indices of links in the page
+    indices = [r.start() for r in re.finditer('<a href=', html)]
+    for index in indices:
+        substring = html[index:]
+        end_tag_index = substring.find(">")
+        substring = substring[:end_tag_index - 1]
+        substring = substring[9:]
+        if substring not in visited and substring not in frontier:
+            if substring.find("fakebook") != -1:
+                frontier.append(substring)
+    if printResponses:
+        print(frontier)
+        print(visited)
+    # Now we check if a page contains a flag
+    # A flag looks like <h2 class='secret_flag' style="color:red">FLAG: 64-characters-of-random-alphanumerics</h2>
+    flag_found = html.find("secret_flag")
+    if flag_found != -1:
+        # A flag has been found
+        if printCrawling:
+            print("------------------FOUND FLAG {}--------------------".format(len(flags) + 1))
+        flag_index = html.find("FLAG: ") + 6
+        flag = html[flag_index:]
+        print(flag[:64])
+        flags.append(flag[:64])
+
+
+# Crawl the site until 5 flags are found, and print out those flags
+def crawl(sock):
+    # First we need to login and get the csrf token and session id
+    csrf_token, session_id = login(sock)
+
+    soc = make_new_socket()
+    # http_get_with_cookies(csrf_token, session_id, "/", soc)
+    # handleResponse(soc)
+
+    # Try fakebook.3700.network/fakebook to initialize frontier
+    http_get_with_cookies(csrf_token, session_id, "/fakebook/", soc)
+    curr_code, curr_dict, curr_html, curr_arr = handleResponse(soc)
+
+    if 'Set-Cookie' in curr_dict:
+        session_id = get_session_id(curr_dict)
+    if curr_html.find('csrf') != -1:
+        print("found a csrftoken in the html")
+    parse_html_for_links(curr_html)
+
+    i = 0
+
+    # Now the starting links have been added, send GET requests and update frontier
+    # until 5 flags are found
+    while len(flags) < 5:
+        if len(frontier) == 0:
+            # Shouldn't get here
+            print("Ran out of frontier! exiting...")
+            sys.exit(1)
+        http_get_with_cookies(csrf_token, session_id, frontier.pop(), soc)
+        curr_code, curr_dict, curr_html, curr_arr = handleResponse(soc)
+
+        # Check if the server gave us a new sessionID
+        if 'Set-Cookie' in curr_dict:
+            session_id = get_session_id(curr_dict)
+        # For debugging
+        if curr_html.find('csrf') != -1:
+            print("found a csrftoken in the html")
+        parse_html_for_links(curr_html)
+        if i % 50 == 0:
+            if printCrawling:
+                print("Number of pages crawled: " + str(i))
+                print("Number of flags found so far:" + str(len(flags)))
+                print("Length of Frontier:" + str(len(frontier)))
+                print(flags)
+        i += 1
+        if i % 100 == 0:
+            soc.close()
+            if printCrawling:
+                print("Made new socket")
+            soc = make_new_socket()
+    if printCrawling:
+        print(flags)
+
+
+def main():
+    sock = make_new_socket()
+    crawl(sock)
+
+
+if __name__ == "__main__":
+    main()
