@@ -30,8 +30,8 @@ chmod +x webcrawler
 ## Authors
 
 Gabe Holmes
-https://www.linkedin.com/in/gabe-holmes/
-holmes.ga@northeastern.edu
+* https://www.linkedin.com/in/gabe-holmes/
+* holmes.ga@northeastern.edu
 
 ## Version History
 
